@@ -11,6 +11,7 @@
 #include "fuzz_helpers.h"
 #include "lz4.h"
 #include "lz4frame.h"
+#include "lz4frame_static.h"
 #include "lz4_helpers.h"
 #include "fuzz_data_producer.h"
 
@@ -40,4 +41,57 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     FUZZ_dataProducer_free(producer);
 
     return 0;
+}
+
+
+int LLVMFuzzerUncompressedDataInjection(const uint8_t *data, size_t size)
+{
+  FUZZ_dataProducer_t* producer = FUZZ_dataProducer_create(data, size);
+  LZ4F_preferences_t const prefs = FUZZ_dataProducer_preferences(producer);
+  size = FUZZ_dataProducer_remainingBytes(producer);
+
+  const char* uncData = "uncompressed data";
+  const size_t uncOffset = 10;
+
+  size_t const dstCapacity = LZ4F_compressFrameBound(LZ4_compressBound(size + sizeof uncData), &prefs);
+  char* const dst = (char*)malloc(dstCapacity);
+  char* const rt = (char*)malloc(FUZZ_dataProducer_remainingBytes(producer));
+
+  FUZZ_ASSERT(dst);
+  FUZZ_ASSERT(rt);
+
+  /* Compression must succeed and round trip correctly. */
+  LZ4F_compressionContext_t ctx;
+  size_t const headerSize = LZ4F_compressBegin(ctx, rt, size, &prefs);
+  FUZZ_ASSERT(!LZ4F_isError(headerSize));
+  size_t compressedSize = headerSize;
+
+  size_t compressUpdate = LZ4F_compressUpdate(ctx,
+                                       dst, dstCapacity,
+                                       data, uncOffset,
+                                       NULL);
+  FUZZ_ASSERT(!LZ4F_isError(compressUpdate));
+  compressedSize += compressUpdate;
+  compressUpdate = LZ4F_uncompressedUpdate(ctx,
+                                       dst, dstCapacity,
+                                       data, sizeof uncData,
+                                       NULL);
+  FUZZ_ASSERT(!LZ4F_isError(compressUpdate));
+  compressedSize += compressUpdate;
+  compressUpdate = LZ4F_compressUpdate(ctx,
+                                           dst, dstCapacity,
+                                           data, size - uncOffset,
+                                           NULL);
+  FUZZ_ASSERT(!LZ4F_isError(compressUpdate));
+  compressedSize += compressUpdate;
+
+  size_t const rtSize = FUZZ_decompressFrame(rt, size, dst, dstSize);
+  FUZZ_ASSERT_MSG(rtSize == size, "Incorrect regenerated size");
+  FUZZ_ASSERT_MSG(!memcmp(data, rt, size), "Corruption!");
+
+  free(dst);
+  free(rt);
+  FUZZ_dataProducer_free(producer);
+
+  return 0;
 }
